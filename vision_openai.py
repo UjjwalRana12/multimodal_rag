@@ -7,7 +7,6 @@ from openai import OpenAI
 import base64
 from pdf2image import convert_from_path
 from PIL import Image
-from sentence_transformers import SentenceTransformer
 
 # Load environment variables
 load_dotenv()
@@ -18,52 +17,158 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-# Load sentence transformer for semantic search
-print("🔄 Loading sentence transformer model...")
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+print("🔄 Using OpenAI text-embedding-3-small model for embeddings...")
+
+def get_openai_embedding(text, model="text-embedding-3-small"):
+    """Get embedding from OpenAI's embedding model"""
+    try:
+        response = client.embeddings.create(
+            input=text,
+            model=model
+        )
+        return np.array(response.data[0].embedding)
+    except Exception as e:
+        print(f"❌ Error getting OpenAI embedding: {e}")
+        return None
 
 def encode_image_to_base64(image_path):
     """Convert image to base64 string"""
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
+def extract_text_with_openai(image_path, page_num):
+    """Extract text from image using OpenAI Vision API"""
+    print(f"🔍 Extracting text using OpenAI OCR for page {page_num}...")
+    base64_image = encode_image_to_base64(image_path)
+    
+    ocr_prompt = """
+    Please extract ALL text content from this image. 
+    
+    Instructions:
+    1. Extract every piece of readable text, including:
+       - Labels, titles, and headings
+       - Numbers, measurements, and values
+       - Annotations and captions
+       - Any technical terms or abbreviations
+       - Text in tables, charts, or diagrams
+    
+    2. Preserve the structure and context where possible
+    3. If there's no readable text, respond with "No readable text found"
+    4. Return only the extracted text, nothing else
+    
+    Extracted text:
+    """
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": ocr_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=1000
+        )
+        
+        extracted_text = response.choices[0].message.content.strip()
+        
+        if extracted_text and extracted_text.lower() != "no readable text found":
+            print(f"✅ OpenAI OCR extracted {len(extracted_text)} characters")
+            print(f"📝 Sample text: {extracted_text[:200]}...")
+            return extracted_text
+        else:
+            print("⚠️ No readable text found by OpenAI OCR")
+            return ""
+            
+    except Exception as e:
+        print(f"❌ OpenAI OCR extraction failed: {e}")
+        return ""
+
 def get_detailed_summary(image_path, page_num):
-    """Get detailed summary of a page"""
-    print(f"🔄 Creating detailed summary for page {page_num}...")
+    """Get detailed visual summary of a page using OpenAI Vision"""
+    print(f"🔄 Creating detailed visual summary for page {page_num}...")
     base64_image = encode_image_to_base64(image_path)
     
     summary_prompt = """
-    Analyze this image/diagram in detail and provide a comprehensive summary including:
-    1. What type of diagram/content this is
-    2. Main components, elements, or sections visible
-    3. Any text, labels, or annotations present
-    4. Processes, flows, or relationships shown
-    5. Technical details, measurements, or specifications
-    6. Overall purpose or function illustrated
+    Analyze this image/diagram in detail and provide a comprehensive VISUAL summary including:
     
-    Make the summary detailed and searchable so it can be used to match user queries.
+    1. **Document Type**: What type of diagram, chart, or document this is
+    2. **Visual Elements**: Main components, shapes, symbols, and visual elements
+    3. **Layout & Structure**: How information is organized and arranged
+    4. **Diagrams & Flows**: Any process flows, connections, or relationships shown
+    5. **Visual Design**: Colors, styles, formatting that convey meaning
+    6. **Technical Details**: Any visual specifications, measurements, or technical elements
+    7. **Purpose**: Overall function or purpose illustrated by the visual design
+    
+    Focus on VISUAL elements rather than text content (text will be extracted separately).
+    Make the summary detailed and searchable for visual similarity matching.
     """
     
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": summary_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{base64_image}"
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": summary_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
                         }
-                    }
-                ]
-            }
-        ],
-        max_tokens=1500
-    )
+                    ]
+                }
+            ],
+            max_tokens=1500
+        )
+        
+        return response.choices[0].message.content
+        
+    except Exception as e:
+        print(f"❌ Error creating summary: {e}")
+        return "Error creating visual summary"
+
+def create_combined_content(summary, ocr_text):
+    """Combine visual summary and OCR text for optimal searchability"""
+    if ocr_text.strip():
+        combined_content = f"""
+VISUAL ANALYSIS:
+{summary}
+
+EXTRACTED TEXT CONTENT:
+{ocr_text}
+
+SEARCHABLE KEYWORDS AND CONTENT:
+Visual elements: {summary[:300]}
+Text content: {ocr_text[:300]}
+Combined context: This page contains both visual diagrams/charts and textual information including {ocr_text[:200].replace(chr(10), ' ')}
+        """.strip()
+    else:
+        combined_content = f"""
+VISUAL ANALYSIS:
+{summary}
+
+EXTRACTED TEXT CONTENT:
+No readable text content found in this image.
+
+SEARCHABLE KEYWORDS AND CONTENT:
+Visual elements: {summary[:300]}
+Content type: This page contains primarily visual/graphical content including diagrams, charts, or images without readable text.
+        """.strip()
     
-    return response.choices[0].message.content
+    return combined_content
 
 def create_faiss_index_with_ids(embeddings, page_metadata):
     """Create FAISS index with ID mapping"""
@@ -88,7 +193,7 @@ def create_faiss_index_with_ids(embeddings, page_metadata):
     return index
 
 def create_page_summaries(pdf_path, output_dir="pdf_pages"):
-    """Convert PDF to images and create detailed summaries"""
+    """Convert PDF to images and create detailed summaries with OpenAI OCR and embeddings"""
     print(f"📄 Processing PDF: {pdf_path}")
     
     os.makedirs(output_dir, exist_ok=True)
@@ -108,24 +213,53 @@ def create_page_summaries(pdf_path, output_dir="pdf_pages"):
             # Save page as image
             image.save(image_path, "PNG")
             
-            # Get detailed summary
+            print(f"\n🟦 Processing Page {page_num}...")
+            
+            # Step 1: Get detailed visual summary from OpenAI Vision
             summary = get_detailed_summary(image_path, page_num)
             
-            # Create embedding for the summary
-            embedding = embedding_model.encode(summary)
+            # Step 2: Extract text using OpenAI Vision (OCR)
+            ocr_text = extract_text_with_openai(image_path, page_num)
+            
+            # Step 3: Combine summary and OCR text
+            combined_content = create_combined_content(summary, ocr_text)
+            
+            # Step 4: Create embedding using OpenAI embedding model
+            print(f"🔄 Creating OpenAI embedding for combined content...")
+            embedding = get_openai_embedding(combined_content)
+            
+            if embedding is None:
+                print(f"❌ Failed to create embedding for page {page_num}, skipping...")
+                continue
             
             # Store metadata with page number as key
             page_metadata[page_num] = {
                 'page': page_num,
                 'image_path': image_path,
-                'summary': summary
+                'visual_summary': summary,
+                'extracted_text': ocr_text,
+                'combined_content': combined_content,
+                'has_text': bool(ocr_text.strip()),
+                'text_length': len(ocr_text),
+                'summary_length': len(summary),
+                'embedding_model': 'text-embedding-3-small'
             }
             
             embeddings_list.append(embedding)
             
-            print(f"✅ Page {page_num} summary created")
-            print(f"Summary: {summary[:200]}...\n")
+            print(f"✅ Page {page_num} processing complete")
+            print(f"📊 Visual summary: {len(summary)} chars")
+            print(f"📝 Extracted text: {len(ocr_text)} chars")
+            print(f"🔗 Combined content: {len(combined_content)} chars")
+            print(f"🎯 Embedding dimension: {len(embedding)}")
+            print(f"Visual preview: {summary[:150]}...")
+            if ocr_text:
+                print(f"Text preview: {ocr_text[:150]}...")
             print("-" * 80)
+        
+        if not embeddings_list:
+            print("❌ No valid embeddings created")
+            return {}, None
         
         # Convert to numpy array
         embeddings = np.array(embeddings_list)
@@ -141,8 +275,40 @@ def create_page_summaries(pdf_path, output_dir="pdf_pages"):
         # Save FAISS index
         faiss.write_index(index, "page_embeddings.index")
         
+        # Save a detailed processing report
+        pages_with_text = sum(1 for p in page_metadata.values() if p['has_text'])
+        total_text_chars = sum(p['text_length'] for p in page_metadata.values())
+        
+        with open('processing_report.txt', 'w', encoding='utf-8') as f:
+            f.write(f"PDF Processing Report - OpenAI Pipeline\n")
+            f.write(f"========================================\n\n")
+            f.write(f"Processing Method: OpenAI Vision API + OpenAI Embeddings\n")
+            f.write(f"Embedding Model: text-embedding-3-small\n")
+            f.write(f"Embedding Dimension: {embeddings.shape[1]}\n")
+            f.write(f"Total pages processed: {len(page_metadata)}\n")
+            f.write(f"Pages with extracted text: {pages_with_text}\n")
+            f.write(f"Pages without text: {len(page_metadata) - pages_with_text}\n")
+            f.write(f"Total extracted text characters: {total_text_chars}\n")
+            f.write(f"Average text per page: {total_text_chars / len(page_metadata):.1f} chars\n\n")
+            
+            f.write("DETAILED PAGE BREAKDOWN:\n")
+            f.write("-" * 40 + "\n")
+            for page_id, metadata in page_metadata.items():
+                f.write(f"\nPage {page_id}:\n")
+                f.write(f"  Has text: {'Yes' if metadata['has_text'] else 'No'}\n")
+                f.write(f"  Text length: {metadata['text_length']} characters\n")
+                f.write(f"  Summary length: {metadata['summary_length']} characters\n")
+                f.write(f"  Embedding model: {metadata['embedding_model']}\n")
+                if metadata['extracted_text']:
+                    f.write(f"  Text sample: {metadata['extracted_text'][:100]}...\n")
+                f.write(f"  Visual summary: {metadata['visual_summary'][:100]}...\n")
+        
         print(f"💾 Page metadata saved to page_metadata.json")
         print(f"💾 FAISS index with IDs saved to page_embeddings.index")
+        print(f"📊 Processing report saved to processing_report.txt")
+        print(f"📈 Statistics: {pages_with_text}/{len(page_metadata)} pages contain readable text")
+        print(f"📈 Total extracted text: {total_text_chars} characters")
+        print(f"🎯 Embedding dimension: {embeddings.shape[1]} (OpenAI text-embedding-3-small)")
         
         return page_metadata, index
         
@@ -163,7 +329,14 @@ def load_page_data():
         # Load FAISS index
         index = faiss.read_index("page_embeddings.index")
         
+        # Count pages with text and total characters
+        pages_with_text = sum(1 for p in page_metadata.values() if p.get('has_text', False))
+        total_chars = sum(p.get('text_length', 0) for p in page_metadata.values())
+        embedding_model = list(page_metadata.values())[0].get('embedding_model', 'unknown')
+        
         print(f"📁 Loaded {len(page_metadata)} pages and FAISS index")
+        print(f"📝 {pages_with_text} pages contain extracted text ({total_chars} total chars)")
+        print(f"🎯 Using embedding model: {embedding_model}")
         return page_metadata, index
         
     except FileNotFoundError as e:
@@ -171,13 +344,19 @@ def load_page_data():
         return {}, None
 
 def search_relevant_pages(query, page_metadata, index, top_k=2):
-    """Search for most relevant pages using FAISS with ID mapping"""
+    """Search for most relevant pages using FAISS with OpenAI embeddings"""
     print(f"🔍 Searching for pages relevant to: '{query}'")
     
-    # Create embedding for the query
-    query_embedding = embedding_model.encode([query]).astype('float32')
+    # Create embedding for the query using OpenAI
+    print(f"🔄 Creating OpenAI embedding for query...")
+    query_embedding = get_openai_embedding(query)
     
-    # Normalize query embedding for cosine similarity
+    if query_embedding is None:
+        print("❌ Failed to create query embedding")
+        return []
+    
+    # Reshape and normalize query embedding
+    query_embedding = query_embedding.reshape(1, -1).astype('float32')
     faiss.normalize_L2(query_embedding)
     
     # Search using FAISS
@@ -190,13 +369,15 @@ def search_relevant_pages(query, page_metadata, index, top_k=2):
         if page_id != -1 and page_id in page_metadata:  # Valid ID
             page = page_metadata[page_id]
             score = scores[0][i]
-            print(f"   Page {page['page']}: {score:.3f} similarity")
+            has_text_indicator = "📝" if page.get('has_text', False) else "🖼️"
+            text_chars = page.get('text_length', 0)
+            print(f"   Page {page['page']} {has_text_indicator} ({text_chars} chars): {score:.3f} similarity")
             relevant_pages.append(page)
     
     return relevant_pages
 
-def answer_query_with_vision(query, page_metadata, index, top_k=2):
-    """Answer user query by finding relevant pages and using OpenAI Vision"""
+def answer_query_with_stored_data(query, page_metadata, index, top_k=2):
+    """Answer user query using stored summaries and OCR text (fast, efficient)"""
     
     # Find most relevant pages using FAISS
     relevant_pages = search_relevant_pages(query, page_metadata, index, top_k)
@@ -204,22 +385,92 @@ def answer_query_with_vision(query, page_metadata, index, top_k=2):
     if not relevant_pages:
         return "❌ No relevant pages found for your query."
     
-    print(f"\n💬 Analyzing {len(relevant_pages)} most relevant pages with OpenAI Vision...")
+    print(f"\n💬 Answering query using stored analysis (no re-scanning needed)...")
     
     results = []
     
     for page in relevant_pages:
-        print(f"🔄 Analyzing Page {page['page']}...")
+        print(f"🔄 Processing answer for Page {page['page']} using stored data...")
+        
+        # Use stored visual summary and extracted text instead of re-scanning
+        enhanced_prompt = f"""
+User Query: "{query}"
+
+STORED VISUAL ANALYSIS:
+{page.get('visual_summary', '')}
+
+STORED EXTRACTED TEXT:
+{page.get('extracted_text', 'No readable text found')}
+
+INSTRUCTIONS:
+Based on the user's query and the stored analysis above, provide a detailed answer using:
+1. The visual elements and structure described in the stored analysis
+2. The extracted text content from the image
+3. The relationships and context between visual and textual elements
+
+Provide a comprehensive response that addresses the user's specific question using only the stored information above.
+        """
+        
+        try:
+            # Use text-only completion instead of vision (much faster and cheaper)
+            response = client.chat.completions.create(
+                model="gpt-4",  # Using GPT-4 text model instead of vision
+                messages=[
+                    {
+                        "role": "user",
+                        "content": enhanced_prompt
+                    }
+                ],
+                max_tokens=1000
+            )
+            
+            result = {
+                'page': page['page'],
+                'answer': response.choices[0].message.content,
+                'image_path': page['image_path'],
+                'has_text': page.get('has_text', False),
+                'text_length': page.get('text_length', 0),
+                'extracted_text': page.get('extracted_text', '')[:200] + "..." if page.get('extracted_text', '') else "",
+                'used_stored_data': True  # Flag to indicate we used stored data
+            }
+            
+            results.append(result)
+            print(f"✅ Page {page['page']} Answer Generated from Stored Data")
+            
+        except Exception as e:
+            print(f"❌ Error generating answer for page {page['page']}: {e}")
+    
+    return results
+
+def answer_query_with_fresh_scan(query, page_metadata, index, top_k=2):
+    """Answer user query by re-scanning images (only use when needed)"""
+    
+    # Find most relevant pages using FAISS
+    relevant_pages = search_relevant_pages(query, page_metadata, index, top_k)
+    
+    if not relevant_pages:
+        return "❌ No relevant pages found for your query."
+    
+    print(f"\n💬 Re-scanning {len(relevant_pages)} pages with OpenAI Vision...")
+    print("⚠️ This will use additional API calls and take longer.")
+    
+    results = []
+    
+    for page in relevant_pages:
+        print(f"🔄 Re-scanning Page {page['page']}...")
         
         base64_image = encode_image_to_base64(page['image_path'])
         
         enhanced_prompt = f"""
-        User Query: "{query}"
-        
-        Page Summary: {page['summary'][:500]}...
-        
-        Based on the user's query and this page content, please provide a detailed answer.
-        Focus specifically on addressing the user's question using the information visible in this image.
+User Query: "{query}"
+
+STORED ANALYSIS (for context):
+Visual Summary: {page.get('visual_summary', '')[:200]}...
+Extracted Text: {page.get('extracted_text', 'No readable text found')[:200]}...
+
+INSTRUCTIONS:
+Please analyze this image fresh and provide a detailed answer to the user's query.
+Use both what you can see in the image and any context from the stored analysis above.
         """
         
         try:
@@ -245,11 +496,15 @@ def answer_query_with_vision(query, page_metadata, index, top_k=2):
             result = {
                 'page': page['page'],
                 'answer': response.choices[0].message.content,
-                'image_path': page['image_path']
+                'image_path': page['image_path'],
+                'has_text': page.get('has_text', False),
+                'text_length': page.get('text_length', 0),
+                'extracted_text': page.get('extracted_text', '')[:200] + "..." if page.get('extracted_text', '') else "",
+                'used_stored_data': False  # Flag to indicate we re-scanned
             }
             
             results.append(result)
-            print(f"✅ Page {page['page']} Analysis Complete")
+            print(f"✅ Page {page['page']} Fresh Analysis Complete")
             
         except Exception as e:
             print(f"❌ Error analyzing page {page['page']}: {e}")
@@ -264,18 +519,21 @@ def list_all_pages(page_metadata):
     """List all available pages"""
     print("📚 Available pages:")
     for page_id, metadata in sorted(page_metadata.items()):
-        print(f"   Page {page_id}: {metadata['summary'][:100]}...")
+        has_text = "📝" if metadata.get('has_text', False) else "🖼️"
+        text_length = metadata.get('text_length', 0)
+        embedding_model = metadata.get('embedding_model', 'unknown')
+        print(f"   Page {page_id} {has_text} ({text_length} chars) [{embedding_model}]: {metadata.get('visual_summary', '')[:100]}...")
 
 # Main execution
 def main():
-    pdf_path = r"pdf\Schematic Diagram of CCPP.pdf"
+    pdf_path = r"pdf\project mnk (1).pdf"
     
     # Check if data already exists
     if os.path.exists('page_metadata.json') and os.path.exists('page_embeddings.index'):
         print("📁 Loading existing page data and FAISS index...")
         page_metadata, index = load_page_data()
     else:
-        print("📄 Creating page summaries and FAISS index for the first time...")
+        print("📄 Creating page summaries and FAISS index with OpenAI pipeline for the first time...")
         if os.path.exists(pdf_path):
             page_metadata, index = create_page_summaries(pdf_path)
         else:
@@ -289,11 +547,17 @@ def main():
     print(f"\n✅ Ready! {len(page_metadata)} pages indexed with FAISS and ready for queries.")
     print(f"📊 FAISS index size: {index.ntotal} vectors")
     
-    # Interactive query loop
+    # Interactive query loop with improved options
     while True:
         print("\n" + "="*60)
-        print("Commands: 'list' to see all pages, 'page N' to get specific page, or ask a question")
-        user_input = input("🤔 Enter your question (or 'quit' to exit): ")
+        print("Commands:")
+        print("  'list' - see all pages")
+        print("  'page N' - get specific page details")
+        print("  'fresh [question]' - answer using fresh image scan (slower, more API calls)")
+        print("  '[question]' - answer using stored data (fast, recommended)")
+        print("="*60)
+        
+        user_input = input("🤔 Enter your command or question (or 'quit' to exit): ")
         
         if user_input.lower() in ['quit', 'exit', 'q']:
             break
@@ -308,26 +572,51 @@ def main():
                 page = get_page_by_id(page_num, page_metadata)
                 if page:
                     print(f"\n📄 Page {page_num}:")
-                    print(f"Summary: {page['summary']}")
+                    print(f"Visual Summary: {page.get('visual_summary', '')}")
+                    if page.get('extracted_text'):
+                        print(f"\n📝 Extracted Text: {page['extracted_text']}")
+                    else:
+                        print(f"\n📝 Extracted Text: No readable text found")
+                    print(f"\n🎯 Embedding Model: {page.get('embedding_model', 'unknown')}")
                 else:
                     print(f"❌ Page {page_num} not found")
             except (ValueError, IndexError):
                 print("❌ Invalid page command. Use 'page N' where N is a number")
             continue
         
-        if user_input.strip():
-            results = answer_query_with_vision(user_input, page_metadata, index, top_k=2)
-            
-            print(f"\n🧠 Answer based on most relevant pages:")
-            print("="*60)
-            
-            if isinstance(results, str):  # Error message
-                print(results)
+        if user_input.lower().startswith('fresh '):
+            # Extract the query after 'fresh '
+            query = user_input[6:].strip()
+            if query:
+                print("🔄 Using fresh image scanning mode...")
+                results = answer_query_with_fresh_scan(query, page_metadata, index, top_k=2)
             else:
-                for result in results:
-                    print(f"\n📄 From Page {result['page']}:")
-                    print(result['answer'])
-                    print("-" * 40)
+                print("❌ Please provide a question after 'fresh'. Example: 'fresh explain the diagram'")
+                continue
+        else:
+            # Regular query using stored data
+            query = user_input.strip()
+            if query:
+                print("⚡ Using stored data mode with OpenAI embeddings (fast, recommended)...")
+                results = answer_query_with_stored_data(query, page_metadata, index, top_k=2)
+            else:
+                continue
+        
+        # Display results
+        print(f"\n🧠 Answer based on most relevant pages:")
+        print("="*60)
+        
+        if isinstance(results, str):  # Error message
+            print(results)
+        else:
+            for result in results:
+                text_indicator = "📝" if result['has_text'] else "🖼️"
+                data_source = "💾 (stored)" if result.get('used_stored_data', True) else "🔄 (fresh scan)"
+                print(f"\n📄 From Page {result['page']} {text_indicator} ({result['text_length']} chars) {data_source}:")
+                print(result['answer'])
+                if result['extracted_text']:
+                    print(f"\n📝 Key extracted text: {result['extracted_text']}")
+                print("-" * 40)
 
 if __name__ == "__main__":
     main()
