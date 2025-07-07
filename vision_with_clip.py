@@ -9,8 +9,8 @@ from pdf2image import convert_from_path
 from PIL import Image
 import torch
 from transformers import CLIPProcessor, CLIPModel
+import shutil
 
-# Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 hf_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
@@ -42,7 +42,7 @@ def get_image_embedding(image_path):
     
     with torch.no_grad():
         inputs = clip_processor(images=image, return_tensors="pt").to(device)
-        image_features = clip_model.get_image_features(**inputs)
+        image_features = clip_model.get_image_features(**inputs) #embeddings createdd
         # Normalize the embeddings
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
     
@@ -117,11 +117,24 @@ def create_faiss_index_with_ids(embeddings, page_metadata):
     
     return index
 
-def create_page_summaries(pdf_path, output_dir="pdf_pages", use_image_embeddings=True):
-    """Convert PDF to images and create detailed summaries"""
-    print(f"📄 Processing PDF: {pdf_path}")
-    
+def get_user_dir(user_id):
+    """Return the directory for a given user/case."""
+    base_dir = os.path.join("data", str(user_id))
+    os.makedirs(base_dir, exist_ok=True)
+    return base_dir
+
+def create_page_summaries(pdf_path, user_id, use_image_embeddings=True):
+    """Convert PDF to images and create detailed summaries for a user/case."""
+    user_dir = get_user_dir(user_id)
+    output_dir = os.path.join(user_dir, "pdf_pages")
     os.makedirs(output_dir, exist_ok=True)
+
+    # Save a copy of the original PDF in the user's folder
+    pdf_copy_path = os.path.join(user_dir, os.path.basename(pdf_path))
+    if not os.path.exists(pdf_copy_path):
+        shutil.copy2(pdf_path, pdf_copy_path)
+
+    print(f"📄 Processing PDF: {pdf_path}")
     
     try:
         # Convert PDF to images
@@ -172,14 +185,14 @@ def create_page_summaries(pdf_path, output_dir="pdf_pages", use_image_embeddings
         
         # Save metadata dictionary
         metadata_to_save = {k: {**v, 'embedding_type': v['embedding_type']} for k, v in page_metadata.items()}
-        with open('page_metadata.json', 'w', encoding='utf-8') as f:
+        with open(os.path.join(user_dir, 'page_metadata.json'), 'w', encoding='utf-8') as f:
             json.dump(metadata_to_save, f, indent=2, ensure_ascii=False)
         
         # Save FAISS index
-        faiss.write_index(index, "page_embeddings.index")
+        faiss.write_index(index, os.path.join(user_dir, "page_embeddings.index"))
         
-        print(f"💾 Page metadata saved to page_metadata.json")
-        print(f"💾 FAISS index with IDs saved to page_embeddings.index")
+        print(f"💾 Page metadata saved to {os.path.join(user_dir, 'page_metadata.json')}")
+        print(f"💾 FAISS index with IDs saved to {os.path.join(user_dir, 'page_embeddings.index')}")
         
         return page_metadata, index
         
@@ -187,30 +200,6 @@ def create_page_summaries(pdf_path, output_dir="pdf_pages", use_image_embeddings
         print(f"❌ Error processing PDF: {e}")
         return {}, None
 
-def load_page_data():
-    """Load existing page metadata and FAISS index"""
-    try:
-        # Load page metadata
-        with open('page_metadata.json', 'r', encoding='utf-8') as f:
-            page_metadata = json.load(f)
-        
-        # Convert string keys back to integers
-        page_metadata = {int(k): v for k, v in page_metadata.items()}
-        
-        # Load FAISS index
-        index = faiss.read_index("page_embeddings.index")
-        
-        print(f"📁 Loaded {len(page_metadata)} pages and FAISS index")
-        
-        # Check embedding type
-        embedding_type = list(page_metadata.values())[0].get('embedding_type', 'unknown')
-        print(f"📊 Using {embedding_type} embeddings")
-        
-        return page_metadata, index
-        
-    except FileNotFoundError as e:
-        print(f"❌ Data files not found: {e}")
-        return {}, None
 
 def search_relevant_pages(query, page_metadata, index, top_k=2):
     """Search for most relevant pages using FAISS with CLIP embeddings"""
@@ -242,7 +231,7 @@ def search_relevant_pages(query, page_metadata, index, top_k=2):
     
     return relevant_pages
 
-# Rest of the functions remain the same...
+
 def answer_query_with_vision(query, page_metadata, index, top_k=2):
     """Answer user query by finding relevant pages and using OpenAI Vision"""
     
@@ -317,25 +306,22 @@ def list_all_pages(page_metadata):
 
 # Main execution
 def main():
-    pdf_path = r"pdf\Schematic Diagram of CCPP.pdf"
+    user_id = input("Enter user/case ID: ").strip()
+    pdf_path = input("Enter path to PDF: ").strip()
     
-    # Check if data already exists
-    if os.path.exists('page_metadata.json') and os.path.exists('page_embeddings.index'):
-        print("📁 Loading existing page data and FAISS index...")
-        page_metadata, index = load_page_data()
+    # Always process the PDF fresh each time
+    print("📄 Processing PDF...")
+    if os.path.exists(pdf_path):
+        print("\n🤔 Choose embedding type:")
+        print("1. Image embeddings (better for visual similarity)")
+        print("2. Text embeddings (better for text queries)")
+        choice = input("Enter choice (1 or 2, default=2): ").strip()
+        
+        use_image_embeddings = choice == "1"
+        page_metadata, index = create_page_summaries(pdf_path, user_id, use_image_embeddings=use_image_embeddings)
     else:
-        print("📄 Creating page summaries and FAISS index for the first time...")
-        if os.path.exists(pdf_path):
-            print("\n🤔 Choose embedding type:")
-            print("1. Image embeddings (better for visual similarity)")
-            print("2. Text embeddings (better for text queries)")
-            choice = input("Enter choice (1 or 2, default=2): ").strip()
-            
-            use_image_embeddings = choice == "1"
-            page_metadata, index = create_page_summaries(pdf_path, use_image_embeddings=use_image_embeddings)
-        else:
-            print(f"❌ PDF file not found: {pdf_path}")
-            return
+        print(f"❌ PDF file not found: {pdf_path}")
+        return
     
     if not page_metadata or index is None:
         print("❌ No page data available")

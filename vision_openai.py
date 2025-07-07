@@ -17,8 +17,13 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-
 print("🔄 Using OpenAI text-embedding-3-small model for embeddings...")
+
+def get_user_dir(user_id):
+    """Return the directory for a given user/case."""
+    base_dir = os.path.join("data", str(user_id))
+    os.makedirs(base_dir, exist_ok=True)
+    return base_dir
 
 def get_openai_embedding(text, model="text-embedding-3-small"):
     """Get embedding from OpenAI's embedding model"""
@@ -192,12 +197,14 @@ def create_faiss_index_with_ids(embeddings, page_metadata):
     
     return index
 
-def create_page_summaries(pdf_path, output_dir="pdf_pages"):
-    """Convert PDF to images and create detailed summaries with OpenAI OCR and embeddings"""
-    print(f"📄 Processing PDF: {pdf_path}")
-    
+def create_page_summaries(pdf_path, user_id):
+    """Convert PDF to images and create detailed summaries with OpenAI OCR and embeddings for a user/case"""
+    user_dir = get_user_dir(user_id)
+    output_dir = os.path.join(user_dir, "pdf_pages")
     os.makedirs(output_dir, exist_ok=True)
-    
+
+    print(f"📄 Processing PDF: {pdf_path}")
+
     try:
         # Convert PDF to images
         images = convert_from_path(pdf_path, dpi=300)
@@ -269,78 +276,22 @@ def create_page_summaries(pdf_path, output_dir="pdf_pages"):
         index = create_faiss_index_with_ids(embeddings, list(page_metadata.values()))
         
         # Save metadata dictionary
-        with open('page_metadata.json', 'w', encoding='utf-8') as f:
+        with open(os.path.join(user_dir, 'page_metadata.json'), 'w', encoding='utf-8') as f:
             json.dump(page_metadata, f, indent=2, ensure_ascii=False)
         
         # Save FAISS index
-        faiss.write_index(index, "page_embeddings.index")
+        faiss.write_index(index, os.path.join(user_dir, "page_embeddings.index"))
         
-        # Save a detailed processing report
-        pages_with_text = sum(1 for p in page_metadata.values() if p['has_text'])
-        total_text_chars = sum(p['text_length'] for p in page_metadata.values())
-        
-        with open('processing_report.txt', 'w', encoding='utf-8') as f:
-            f.write(f"PDF Processing Report - OpenAI Pipeline\n")
-            f.write(f"========================================\n\n")
-            f.write(f"Processing Method: OpenAI Vision API + OpenAI Embeddings\n")
-            f.write(f"Embedding Model: text-embedding-3-small\n")
-            f.write(f"Embedding Dimension: {embeddings.shape[1]}\n")
-            f.write(f"Total pages processed: {len(page_metadata)}\n")
-            f.write(f"Pages with extracted text: {pages_with_text}\n")
-            f.write(f"Pages without text: {len(page_metadata) - pages_with_text}\n")
-            f.write(f"Total extracted text characters: {total_text_chars}\n")
-            f.write(f"Average text per page: {total_text_chars / len(page_metadata):.1f} chars\n\n")
-            
-            f.write("DETAILED PAGE BREAKDOWN:\n")
-            f.write("-" * 40 + "\n")
-            for page_id, metadata in page_metadata.items():
-                f.write(f"\nPage {page_id}:\n")
-                f.write(f"  Has text: {'Yes' if metadata['has_text'] else 'No'}\n")
-                f.write(f"  Text length: {metadata['text_length']} characters\n")
-                f.write(f"  Summary length: {metadata['summary_length']} characters\n")
-                f.write(f"  Embedding model: {metadata['embedding_model']}\n")
-                if metadata['extracted_text']:
-                    f.write(f"  Text sample: {metadata['extracted_text'][:100]}...\n")
-                f.write(f"  Visual summary: {metadata['visual_summary'][:100]}...\n")
-        
-        print(f"💾 Page metadata saved to page_metadata.json")
-        print(f"💾 FAISS index with IDs saved to page_embeddings.index")
-        print(f"📊 Processing report saved to processing_report.txt")
-        print(f"📈 Statistics: {pages_with_text}/{len(page_metadata)} pages contain readable text")
-        print(f"📈 Total extracted text: {total_text_chars} characters")
+        print(f"💾 Page metadata saved to {os.path.join(user_dir, 'page_metadata.json')}")
+        print(f"💾 FAISS index with IDs saved to {os.path.join(user_dir, 'page_embeddings.index')}")
+        print(f"📈 Statistics: {sum(1 for p in page_metadata.values() if p['has_text'])}/{len(page_metadata)} pages contain readable text")
+        print(f"📈 Total extracted text: {sum(p['text_length'] for p in page_metadata.values())} characters")
         print(f"🎯 Embedding dimension: {embeddings.shape[1]} (OpenAI text-embedding-3-small)")
         
         return page_metadata, index
         
     except Exception as e:
         print(f"❌ Error processing PDF: {e}")
-        return {}, None
-
-def load_page_data():
-    """Load existing page metadata and FAISS index"""
-    try:
-        # Load page metadata
-        with open('page_metadata.json', 'r', encoding='utf-8') as f:
-            page_metadata = json.load(f)
-        
-        # Convert string keys back to integers
-        page_metadata = {int(k): v for k, v in page_metadata.items()}
-        
-        # Load FAISS index
-        index = faiss.read_index("page_embeddings.index")
-        
-        # Count pages with text and total characters
-        pages_with_text = sum(1 for p in page_metadata.values() if p.get('has_text', False))
-        total_chars = sum(p.get('text_length', 0) for p in page_metadata.values())
-        embedding_model = list(page_metadata.values())[0].get('embedding_model', 'unknown')
-        
-        print(f"📁 Loaded {len(page_metadata)} pages and FAISS index")
-        print(f"📝 {pages_with_text} pages contain extracted text ({total_chars} total chars)")
-        print(f"🎯 Using embedding model: {embedding_model}")
-        return page_metadata, index
-        
-    except FileNotFoundError as e:
-        print(f"❌ Data files not found: {e}")
         return {}, None
 
 def search_relevant_pages(query, page_metadata, index, top_k=2):
@@ -526,27 +477,35 @@ def list_all_pages(page_metadata):
 
 # Main execution
 def main():
-    pdf_path = r"pdf\project mnk (1).pdf"
+    user_id = input("Enter user/case ID: ").strip()
+    pdf_path = input("Enter path to PDF: ").strip()
     
-    # Check if data already exists
-    if os.path.exists('page_metadata.json') and os.path.exists('page_embeddings.index'):
-        print("📁 Loading existing page data and FAISS index...")
-        page_metadata, index = load_page_data()
+    user_dir = get_user_dir(user_id)
+    metadata_path = os.path.join(user_dir, 'page_metadata.json')
+    index_path = os.path.join(user_dir, 'page_embeddings.index')
+
+    # Check if data already exists for this user/case
+    if os.path.exists(metadata_path) and os.path.exists(index_path):
+        print("📁 Loading existing page data and FAISS index for this user/case...")
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            page_metadata = json.load(f)
+        page_metadata = {int(k): v for k, v in page_metadata.items()}
+        index = faiss.read_index(index_path)
     else:
         print("📄 Creating page summaries and FAISS index with OpenAI pipeline for the first time...")
         if os.path.exists(pdf_path):
-            page_metadata, index = create_page_summaries(pdf_path)
+            page_metadata, index = create_page_summaries(pdf_path, user_id)
         else:
             print(f"❌ PDF file not found: {pdf_path}")
             return
-    
+
     if not page_metadata or index is None:
         print("❌ No page data available")
         return
-    
+
     print(f"\n✅ Ready! {len(page_metadata)} pages indexed with FAISS and ready for queries.")
     print(f"📊 FAISS index size: {index.ntotal} vectors")
-    
+
     # Interactive query loop with improved options
     while True:
         print("\n" + "="*60)
