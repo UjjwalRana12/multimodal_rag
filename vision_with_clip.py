@@ -201,7 +201,7 @@ def create_page_summaries(pdf_path, user_id, use_image_embeddings=True):
         return {}, None
 
 
-def search_relevant_pages(query, page_metadata, index, top_k=2):
+def search_relevant_pages(query, page_metadata, index, top_k=1):
     """Search for most relevant pages using FAISS with CLIP embeddings"""
     print(f"🔍 Searching for pages relevant to: '{query}'")
     
@@ -232,7 +232,7 @@ def search_relevant_pages(query, page_metadata, index, top_k=2):
     return relevant_pages
 
 
-def answer_query_with_vision(query, page_metadata, index, top_k=2):
+def answer_query_with_vision(query, page_metadata, index, top_k=1):
     """Answer user query by finding relevant pages and using OpenAI Vision"""
     
     # Find most relevant pages using FAISS

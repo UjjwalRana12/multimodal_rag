@@ -328,7 +328,7 @@ def search_relevant_pages(query, page_metadata, index, top_k=2):
     return relevant_pages
 
 def answer_query_with_stored_data(query, page_metadata, index, top_k=2):
-    """Answer user query using stored summaries and OCR text (fast, efficient)"""
+    """Answer user query by scanning relevant pages with OpenAI Vision"""
     
     # Find most relevant pages using FAISS
     relevant_pages = search_relevant_pages(query, page_metadata, index, top_k)
@@ -336,97 +336,39 @@ def answer_query_with_stored_data(query, page_metadata, index, top_k=2):
     if not relevant_pages:
         return "❌ No relevant pages found for your query."
     
-    print(f"\n💬 Answering query using stored analysis (no re-scanning needed)...")
+    print(f"\n💬 Analyzing {len(relevant_pages)} most relevant pages with OpenAI Vision...")
     
     results = []
     
     for page in relevant_pages:
-        print(f"🔄 Processing answer for Page {page['page']} using stored data...")
-        
-        # Use stored visual summary and extracted text instead of re-scanning
-        enhanced_prompt = f"""
-User Query: "{query}"
-
-STORED VISUAL ANALYSIS:
-{page.get('visual_summary', '')}
-
-STORED EXTRACTED TEXT:
-{page.get('extracted_text', 'No readable text found')}
-
-INSTRUCTIONS:
-Based on the user's query and the stored analysis above, provide a detailed answer using:
-1. The visual elements and structure described in the stored analysis
-2. The extracted text content from the image
-3. The relationships and context between visual and textual elements
-
-Provide a comprehensive response that addresses the user's specific question using only the stored information above.
-        """
-        
-        try:
-            # Use text-only completion instead of vision (much faster and cheaper)
-            response = client.chat.completions.create(
-                model="gpt-4",  # Using GPT-4 text model instead of vision
-                messages=[
-                    {
-                        "role": "user",
-                        "content": enhanced_prompt
-                    }
-                ],
-                max_tokens=1000
-            )
-            
-            result = {
-                'page': page['page'],
-                'answer': response.choices[0].message.content,
-                'image_path': page['image_path'],
-                'has_text': page.get('has_text', False),
-                'text_length': page.get('text_length', 0),
-                'extracted_text': page.get('extracted_text', '')[:200] + "..." if page.get('extracted_text', '') else "",
-                'used_stored_data': True  # Flag to indicate we used stored data
-            }
-            
-            results.append(result)
-            print(f"✅ Page {page['page']} Answer Generated from Stored Data")
-            
-        except Exception as e:
-            print(f"❌ Error generating answer for page {page['page']}: {e}")
-    
-    return results
-
-def answer_query_with_fresh_scan(query, page_metadata, index, top_k=2):
-    """Answer user query by re-scanning images (only use when needed)"""
-    
-    # Find most relevant pages using FAISS
-    relevant_pages = search_relevant_pages(query, page_metadata, index, top_k)
-    
-    if not relevant_pages:
-        return "❌ No relevant pages found for your query."
-    
-    print(f"\n💬 Re-scanning {len(relevant_pages)} pages with OpenAI Vision...")
-    print("⚠️ This will use additional API calls and take longer.")
-    
-    results = []
-    
-    for page in relevant_pages:
-        print(f"🔄 Re-scanning Page {page['page']}...")
+        print(f"🔄 Analyzing Page {page['page']} with OpenAI Vision...")
         
         base64_image = encode_image_to_base64(page['image_path'])
         
+        # Enhanced prompt that includes stored context for better analysis
         enhanced_prompt = f"""
 User Query: "{query}"
 
-STORED ANALYSIS (for context):
-Visual Summary: {page.get('visual_summary', '')[:200]}...
-Extracted Text: {page.get('extracted_text', 'No readable text found')[:200]}...
+STORED CONTEXT (for reference):
+Visual Summary: {page.get('visual_summary', '')[:300]}...
+Extracted Text: {page.get('extracted_text', 'No readable text found')[:300]}...
 
 INSTRUCTIONS:
-Please analyze this image fresh and provide a detailed answer to the user's query.
-Use both what you can see in the image and any context from the stored analysis above.
+Please analyze this image carefully and provide a detailed answer to the user's query: "{query}"
+
+Focus on:
+1. Visual elements, diagrams, charts, and structures in the image
+2. Any text, labels, numbers, or annotations visible
+3. Relationships, flows, processes, or connections shown
+4. Technical details, measurements, or specifications
+5. How the visual content relates to the user's specific question
+
+Provide a comprehensive response that directly addresses the user's query using what you can see in the image.
         """
         
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o",  # Using vision model for image analysis
                 messages=[
                     {
                         "role": "user",
@@ -451,16 +393,18 @@ Use both what you can see in the image and any context from the stored analysis 
                 'has_text': page.get('has_text', False),
                 'text_length': page.get('text_length', 0),
                 'extracted_text': page.get('extracted_text', '')[:200] + "..." if page.get('extracted_text', '') else "",
-                'used_stored_data': False  # Flag to indicate we re-scanned
+                'used_stored_data': False,  # Flag to indicate we scanned fresh
+                'analysis_type': 'vision_analysis'
             }
             
             results.append(result)
-            print(f"✅ Page {page['page']} Fresh Analysis Complete")
+            print(f"✅ Page {page['page']} Vision Analysis Complete")
             
         except Exception as e:
             print(f"❌ Error analyzing page {page['page']}: {e}")
     
     return results
+
 
 def get_page_by_id(page_id, page_metadata):
     """Get page metadata by ID"""
@@ -512,8 +456,7 @@ def main():
         print("Commands:")
         print("  'list' - see all pages")
         print("  'page N' - get specific page details")
-        print("  'fresh [question]' - answer using fresh image scan (slower, more API calls)")
-        print("  '[question]' - answer using stored data (fast, recommended)")
+        print("  '[question]' - analyze relevant pages with OpenAI Vision")
         print("="*60)
         
         user_input = input("🤔 Enter your command or question (or 'quit' to exit): ")
@@ -543,26 +486,16 @@ def main():
                 print("❌ Invalid page command. Use 'page N' where N is a number")
             continue
         
-        if user_input.lower().startswith('fresh '):
-            # Extract the query after 'fresh '
-            query = user_input[6:].strip()
-            if query:
-                print("🔄 Using fresh image scanning mode...")
-                results = answer_query_with_fresh_scan(query, page_metadata, index, top_k=2)
-            else:
-                print("❌ Please provide a question after 'fresh'. Example: 'fresh explain the diagram'")
-                continue
+        # Regular query using OpenAI Vision analysis
+        query = user_input.strip()
+        if query:
+            print("🔍 Analyzing relevant pages with OpenAI Vision...")
+            results = answer_query_with_stored_data(query, page_metadata, index, top_k=2)
         else:
-            # Regular query using stored data
-            query = user_input.strip()
-            if query:
-                print("⚡ Using stored data mode with OpenAI embeddings (fast, recommended)...")
-                results = answer_query_with_stored_data(query, page_metadata, index, top_k=2)
-            else:
-                continue
+            continue
         
         # Display results
-        print(f"\n🧠 Answer based on most relevant pages:")
+        print(f"\n🧠 Vision Analysis Results:")
         print("="*60)
         
         if isinstance(results, str):  # Error message
@@ -570,8 +503,7 @@ def main():
         else:
             for result in results:
                 text_indicator = "📝" if result['has_text'] else "🖼️"
-                data_source = "💾 (stored)" if result.get('used_stored_data', True) else "🔄 (fresh scan)"
-                print(f"\n📄 From Page {result['page']} {text_indicator} ({result['text_length']} chars) {data_source}:")
+                print(f"\n📄 From Page {result['page']} {text_indicator} ({result['text_length']} chars) [🔄 Vision Analysis]:")
                 print(result['answer'])
                 if result['extracted_text']:
                     print(f"\n📝 Key extracted text: {result['extracted_text']}")
